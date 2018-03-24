@@ -1,0 +1,263 @@
+Description: >
+    This template deploys an Application Load Balancer that exposes our various ECS services.
+    We create them it a seperate nested template, so it can be referenced by all of the other nested templates.
+
+Parameters:
+    VPCStackName:
+        Type: String
+        Description: Stack which creates networking resources
+        MinLength: 1
+        MaxLength: 255
+        AllowedPattern: "^[a-zA-Z][-a-zA-Z0-9]*$"
+
+    EnvironmentName:
+        Description: An environment name that will be prefixed to resource names
+        Type: String
+        Default: ECSdemo
+
+    Path:
+        Type: String
+        Default: "*"
+        Description: Path pattern used for public Load balancer. Use '*' to send all ALB traffic to ECS service
+
+    ServiceName:
+        Type: String
+        Default: "FargateService"
+        Description: Name of the ECS Service
+
+    ExecutionRoleArn:
+        Type: String
+        Default: "arn:aws:iam::269833243367:role/ecsTaskExecutionRole"
+        Description: Task Execution Role for the service 
+
+    ServiceRole: 
+        Type: String
+        Default: "AWSServiceRoleForECS"
+        Description: Optional Service Role
+
+    DesiredCount:
+        Type: Number
+        Default: 2
+        Description: Desired number of tasks to be run as part of ECS Service
+
+    ContainerPort:
+        Type: Number
+        Default: 80
+        Description: Port number where the application in the container needs to bind to 
+
+    ContainerCpu:
+        Type: Number
+        Default: 256
+        Description: CPU value for container
+
+    ContainerMemory:
+        Type: Number
+        Default: 512
+        Description: Memory value for container
+
+    ImageUrl:
+        Type: String
+        Default: "269833243367.dkr.ecr.us-east-1.amazonaws.com/dockerimages:fargatedemo"
+        Description: Container Image used in task definition 
+
+    TaskRoleArn:
+        Type: String
+        Default: ""
+        Description: Optional Task Role for the service 
+
+    LogGroupName: 
+        Type: String 
+        Default: "/ecs/fargate/fargatedemo"
+        Description: Log group used in Task Definition 
+
+    StreamPrefix: 
+        Type: String
+        Default: "logs"
+        Description: Steam Prefix for Log Group  
+
+
+
+Conditions:
+    ServiceRoleProvided: !Not [ !Equals [!Ref 'ServiceRole', ''] ]
+    TaskRoleProvided: !Not [ !Equals [!Ref 'TaskRoleArn', ''] ]
+
+
+
+Resources:   
+    LoadBalancerSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties: 
+            VpcId:
+               Fn::ImportValue: !Sub ${VPCStackName}-VpcID
+            GroupDescription: Access to the load balancer that sits in front of ECS
+            SecurityGroupIngress: 
+              - 
+                IpProtocol: "tcp"
+                FromPort: "80"
+                ToPort: "80"
+                CidrIp: "0.0.0.0/0"
+              - 
+                IpProtocol: "tcp"
+                FromPort: "443"   
+                ToPort: "443"
+                CidrIp: "0.0.0.0/0"
+            SecurityGroupEgress:
+                - CidrIp: 0.0.0.0/0
+                  IpProtocol: -1
+            Tags: 
+                - Key: Name
+                  Value: !Sub ${EnvironmentName}-LoadBalancerSecurityGroup
+
+
+    LoadBalancer:
+        Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+        Properties:
+            Name: !Sub ${EnvironmentName}-ECS-ALB
+            Scheme: internet-facing
+            Subnets: 
+                - Fn::ImportValue: !Sub ${VPCStackName}-PublicSubnet1
+                - Fn::ImportValue: !Sub ${VPCStackName}-PublicSubnet2
+            SecurityGroups: 
+                - !Ref LoadBalancerSecurityGroup
+    
+    TargetGroup:
+        Type: AWS::ElasticLoadBalancingV2::TargetGroup
+        Properties:
+          HealthCheckIntervalSeconds: 6
+          HealthCheckPath: /
+          HealthCheckProtocol: HTTP
+          HealthCheckTimeoutSeconds: 5
+          HealthyThresholdCount: 2
+          TargetType: ip
+          Name: !Sub ${EnvironmentName}-${ServiceName}-ECS-TG
+          Port: 80
+          Protocol: HTTP
+          UnhealthyThresholdCount: 2
+          VpcId: 
+              Fn::ImportValue: !Sub ${VPCStackName}-VpcID
+
+    LoadBalancerListener:
+        Type: AWS::ElasticLoadBalancingV2::Listener
+        Properties:
+            LoadBalancerArn: !Ref LoadBalancer
+            Port: 80
+            Protocol: HTTP 
+            DefaultActions: 
+                - Type: forward
+                  TargetGroupArn: !Ref TargetGroup
+
+
+    LoadBalancerRule:
+        Type: AWS::ElasticLoadBalancingV2::ListenerRule
+        Properties:
+          Actions:
+            - TargetGroupArn: !Ref 'TargetGroup'
+              Type: 'forward'
+          Conditions:
+            - Field: path-pattern
+              Values: [!Ref 'Path']
+          ListenerArn: !Ref LoadBalancerListener
+          Priority: 1
+
+
+    #SG for tasks
+    TaskSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+            GroupDescription: Access to the Fargate tasks
+            VpcId: 
+                Fn::ImportValue: !Sub ${VPCStackName}-VpcID
+            Tags: 
+                - Key: name
+                  Value: !Sub ${EnvironmentName}-ECSTaskSG
+
+    TaskSecurityGroupIngressFromLoadBalancer:
+        Type: AWS::EC2::SecurityGroupIngress
+        Properties:
+            Description: Ingress from the public ALB
+            GroupId: !Ref 'TaskSecurityGroup'
+            IpProtocol: -1
+            SourceSecurityGroupId: !Ref 'LoadBalancerSecurityGroup'
+
+    TaskSecurityGroupIngressFromSelf:
+        Type: AWS::EC2::SecurityGroupIngress
+        Properties:
+            Description: Ingress from other containers in the same security group
+            GroupId: !Ref 'TaskSecurityGroup'
+            IpProtocol: -1
+            SourceSecurityGroupId: !Ref 'TaskSecurityGroup'
+
+    Cluster: 
+        Type: "AWS::ECS::Cluster"
+        Properties:
+            ClusterName: ClusterFargate
+    
+    TaskDefinition:
+        Type: AWS::ECS::TaskDefinition
+        Properties:
+          Family: !Ref 'ServiceName'
+          Cpu: !Ref 'ContainerCpu'
+          Memory: !Ref 'ContainerMemory'
+          NetworkMode: awsvpc
+          RequiresCompatibilities:
+            - FARGATE
+          ExecutionRoleArn: !Ref ExecutionRoleArn
+          TaskRoleArn: 
+            Fn::If:
+                  - 'TaskRoleProvided'
+                  - !Ref 'TaskRoleArn'
+                  - !Ref "AWS::NoValue"
+          ContainerDefinitions:
+            - Name: !Ref 'ServiceName'
+              Cpu: !Ref 'ContainerCpu'
+              Memory: !Ref 'ContainerMemory'
+              Image: !Ref 'ImageUrl'
+              PortMappings:
+                - ContainerPort: !Ref 'ContainerPort'
+              Essential: "true"
+              LogConfiguration:
+                LogDriver: awslogs
+                Options:
+                    awslogs-group: !Ref LogGroupName
+                    awslogs-region: !Ref AWS::Region
+                    awslogs-stream-prefix: !Ref StreamPrefix
+                    
+
+    Service:
+        Type: AWS::ECS::Service
+        DependsOn: LoadBalancerRule
+        Properties:
+            ServiceName: !Ref 'ServiceName'
+            Cluster: !Ref Cluster
+            LaunchType: FARGATE
+            DeploymentConfiguration:
+                MaximumPercent: 100
+                MinimumHealthyPercent: 50
+            DesiredCount: !Ref 'DesiredCount'
+            NetworkConfiguration:
+                AwsvpcConfiguration:
+                    AssignPublicIp: DISABLED
+                    SecurityGroups: [!Ref 'TaskSecurityGroup']
+                    Subnets: 
+                        - Fn::ImportValue: !Sub ${VPCStackName}-PrivateSubnet1
+                        - Fn::ImportValue: !Sub ${VPCStackName}-PrivateSubnet2
+            TaskDefinition: !Ref 'TaskDefinition'
+            LoadBalancers:
+                - ContainerName: !Ref 'ServiceName'
+                  ContainerPort: !Ref 'ContainerPort'
+                  TargetGroupArn: !Ref 'TargetGroup'
+
+
+Outputs:
+
+    LoadBalancer:
+        Description: A reference to the Application Load Balancer
+        Value: !Ref LoadBalancer
+
+    LoadBalancerUrl:
+        Description: The URL of the ALB
+        Value: !GetAtt LoadBalancer.DNSName
+
+    Listener:
+        Description: A reference to a port 80 listener
+        Value: !Ref LoadBalancerListener  

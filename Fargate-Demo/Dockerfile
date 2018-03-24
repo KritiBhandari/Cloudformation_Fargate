@@ -1,0 +1,10 @@
+FROM ubuntu:latest
+MAINTAINER Kriti Bhandari "kriti.s.bhandari@gmail.com"
+RUN apt-get update -y
+RUN apt-get install -y python-pip python-dev build-essential
+COPY . /app
+WORKDIR /app
+EXPOSE 80
+RUN pip install Flask==0.10.1
+ENTRYPOINT ["python"]
+CMD ["app.py"]
